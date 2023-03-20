@@ -1,0 +1,327 @@
+import torch
+from torch import nn
+import torch.nn.functional as F
+import models
+from torch.utils.data import DataLoader
+
+import os.path as osp
+from tqdm import tqdm
+from torch.autograd import Variable
+import numpy as np
+from utils.logger import AverageMeter as meter
+from data_loader import Visda_Dataset, Office_Dataset, Home_Dataset
+from utils.loss import FocalLoss
+
+from models.component import Discriminator
+
+class ModelTrainer():
+    def __init__(self, args, data, step=0, label_flag=None, v=None, logger=None):
+        self.args = args
+        self.batch_size = args.batch_size
+        self.data_workers = 6
+
+        self.step = step
+        self.data = data
+        self.label_flag = label_flag
+
+        self.num_class = data.num_class
+        self.num_task = args.batch_size
+        self.num_to_select = 0
+
+        self.model = models.create(args.arch, args)
+        self.model = nn.DataParallel(self.model).cuda()
+
+        # GNN
+        self.gnnModel = models.create('gnn', args)
+        self.gnnModel = nn.DataParallel(self.gnnModel).cuda()
+
+        self.meter = meter(args.num_class)
+        self.v = v
+
+        # CE for node classification
+        if args.loss == 'focal':
+            self.criterionCE = FocalLoss().cuda()
+        elif args.loss == 'nll':
+            self.criterionCE = nn.NLLLoss(reduction='mean').cuda()
+        
+        # BCE for edge
+        self.criterion = nn.BCELoss(reduction='mean').cuda()
+        self.global_step = 0
+        self.logger = logger
+        self.val_acc = 0
+        self.threshold = args.threshold
+
+        if self.args.discriminator:
+            self.discriminator = Discriminator(self.args.in_features)
+            self.discriminator = nn.DataParallel(self.discriminator).cuda()
+            self.discriminator_no_back = Discriminator(self.args.in_features)
+            self.discriminator_no_back = nn.DataParallel(self.discriminator_no_back).cuda()
+
+    def get_dataloader(self, dataset, training=False):
+
+        if self.args.visualization:
+            data_loader = DataLoader(dataset, batch_size=self.batch_size, num_workers=self.data_workers,
+                                     shuffle=training, pin_memory=True, drop_last=True)
+            return data_loader
+
+        data_loader = DataLoader(dataset, batch_size=self.batch_size, num_workers=self.data_workers,
+                                 shuffle=training, pin_memory=True, drop_last=training)
+        return data_loader
+    
+    def adjust_lr(self, epoch, step_size):
+        lr = self.args.lr / (2 **(epoch // step_size))
+        for g in self.optimizer.param_groups:
+            g['lr'] = lr * g.get('lr_mult', 1)
+        
+        if epoch % step_size == 0:
+            print('Epoch {}, current lr {}'.format(epoch, lr))
+    
+    def label2edge(self, targets):
+
+        batch_size, num_sample = targets.size()
+        target_node_mask = torch.eq(targets, self.num_class).type(torch.bool).cuda()
+        source_node_mask = ~target_node_mask & ~torch.eq(targets, self.num_class-1).type(torch.bool)
+
+        label_i = targets.unsqueeze(-1).repeat(1, 1, num_sample)
+        label_j = label_i.transpose(1, 2)
+
+        edge = torch.eq(label_i, label_j).float().cuda()
+        target_edge_mask = (torch.eq(label_i, self.num_class) + torch.eq(label_j, self.num_class)).type(torch.bool).cuda()
+        source_edge_mask = ~target_edge_mask
+        init_edge = edge*source_edge_mask.float()
+
+        return init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask
+
+    def transform_shape(self, tensor):
+
+        batch_size, num_class, other_dim = tensor.shape
+        tensor = tensor.view(1, batch_size*num_class, other_dim)
+        return tensor
+    
+    def train(self, step, epochs=70, step_size=55):
+        args = self.args
+
+        train_loader = self.get_dataloader(self.data, training=True)
+
+        # initialize model
+
+        # change the learning rate
+        if args.arch == 'res':
+            if args.dataset == 'visda' or args.dataset == 'office':
+                param_groups = [
+                    {'params': self.model.module.CNN.parameters(), 'lr_mult': 0.01},
+                    {'params': self.gnnModel.parameters(), 'lr_mult': 0.1},
+                ]
+                if self.args.discriminator:
+                    param_groups.append({'params': self.discriminator.parameters(), 'lr_mult': 0.1})
+                    param_groups.append({'params': self.discriminator_no_back.parameters(), 'lr_mult': 0.1})
+            else:
+                param_groups = [
+                    {'params': self.model.module.CNN.parameters(), 'lr_mult': 0.05},
+                    {'params': self.gnnModel.parameters(), 'lr_mult': 0.8},
+                ]
+                if self.args.discriminator:
+                    param_groups.append({'params': self.discriminator.parameters(), 'lr_mult': 0.8})
+                    param_groups.append({'params': self.discriminator_no_back.parameters(), 'lr_mult': 0.8})
+            
+            args.in_features = 2048
+        else:
+            raise Exception('Wrong architecture!')
+
+        self.optimizer = torch.optim.Adam(params=param_groups, lr=args.lr, weight_decay=args.weight_decay)
+        self.model.train()
+        self.gnnModel.train()
+        self.discriminator.train()
+        self.discriminator_no_back.train()
+        self.meter.reset()
+
+        for epoch in range(epochs):
+            self.adjust_lr(epoch, step_size)
+
+            with tqdm(total=len(train_loader)) as pbar:
+                for i, inputs in enumerate(train_loader):
+
+                    images = Variable(inputs[0], requires_grad=False).cuda()
+                    targets = Variable(inputs[1]).cuda()
+
+                    targets_DT = targets[:, args.num_class-1:].reshape(-1)
+
+                    if self.args.discriminator:
+                        domain_label = Variable(inputs[3].float()).cuda()
+                    
+                    targets = self.transform_shape(targets.unsqueeze(-1)).squeeze(-1)
+
+                    init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(targets)
+
+                    features = self.model(images)
+
+                    features = self.transform_shape(features)
+
+                    edge_logits, node_logits = self.gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
+
+                    full_edge_loss = [self.criterion(edge_logit.masked_select(source_edge_mask), init_edge.masked_select(source_edge_mask)) for edge_logit in edge_logits]
+                    norm_node_logits = F.softmax(node_logits[-1], dim=-1)
+
+                    if args.loss == 'nll':
+                        source_node_loss = self.criterionCE(torch.log(norm_node_logits[source_node_mask, :]+1e-5),
+                                                            targets.masked_select(source_node_mask))
+                    elif args.loss == 'focal':
+                        source_node_loss = self.criterionCE(norm_node_logits[source_node_mask, :],
+                                                            targets.masked_select(source_node_mask))
+                    
+                    edge_loss = 0
+                    for l in range(args.num_layers - 1):
+                        edge_loss += full_edge_loss[l] * 0.5
+                    edge_loss += full_edge_loss[-1] * 1
+
+                    loss = 1 * edge_loss + args.node_loss * source_node_loss
+
+                    if self.args.discriminator:
+                        unk_label_mask = torch.eq(targets, args.num_class-1).squeeze()
+                        domain_pred = self.discriminator(features)
+                        domain_pred_no_back = self.discriminator_no_back(features, eta=0.0)
+                        temp = torch.squeeze(domain_pred)[~unk_label_mask]
+                        domain_loss = self.criterion(temp, domain_label.view(-1)[~unk_label_mask])
+                        domain_loss_no_back = self.criterion(torch.squeeze(domain_pred_no_back), domain_label.view(-1))
+                        loss = loss + args.adv_coeff * (domain_loss + domain_loss_no_back)
+                    
+                    node_pred = norm_node_logits[source_node_mask, :].detach().cpu().max(1)[1]
+                    node_prec = node_pred.eq(targets.masked_select(source_node_mask).detach().cpu()).double().mean()
+
+                    # Only for debugging
+                    target_labels = Variable(inputs[2]).cuda()
+                    target_labels = self.transform_shape(target_labels.unsqueeze(-1)).view(-1)
+                    if target_node_mask.any():
+
+                        target_pred = norm_node_logits[target_node_mask, :].max(1)[1]
+
+                        # <unlabeled> data mask
+                        pseudo_label_mask = ~torch.eq(targets_DT, args.num_class).detach().cpu()
+
+                        # remove unk for calculation
+                        unk_label_mask = torch.eq(target_labels[~pseudo_label_mask], args.num_class-1).detach().cpu()
+
+                        # only predict on <unlabeled> data
+                        target_prec = target_pred.eq(target_labels[~pseudo_label_mask]).double().data.cpu()
+
+                        # update prec calculation on <unlabeled> data
+                        self.meter.update(target_labels[~pseudo_label_mask].detach().cpu().view(-1).numpy(),
+                                          target_prec.numpy())
+                        
+                        # For pseudo_labeled data, remove unk data for prec calculation
+                        pseudo_unk_mask = torch.eq(target_labels[pseudo_label_mask], args.num_class-1).detach().cpu()
+                        pseudo_prec = torch.eq(target_labels[pseudo_label_mask], targets_DT[pseudo_label_mask]).double()
+                        if True in pseudo_unk_mask:
+                            self.meter.update(target_labels[pseudo_label_mask].detach().cpu().masked_select(~pseudo_unk_mask).view(-1).numpy(),
+                                              pseudo_prec.detach().cpu().masked_select(~pseudo_unk_mask).view(-1).numpy())
+                        
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+
+                    self.logger.global_step += 1
+
+                    if self.args.discriminator:
+                        self.logger.log_scalar('train/domain_loss', domain_loss, self.logger.global_step)
+                        self.logger.log_scalar('train/domain_loss_no_back', domain_loss_no_back, self.logger.global_step)
+                    self.logger.log_scalar('train/node_prec', node_prec, self.logger.global_step)
+                    self.logger.log_scalar('train/edge_loss', edge_loss, self.logger.global_step)
+                    
+                    pbar.update()
+                    if i > 150:
+                        break
+
+            if (epoch + 1) % args.log_epoch == 0:
+                print('----Start Epoch {} Training --------'.format(epoch))
+                for k in range(args.num_class - 1):
+                    print('Target {} Precision: {:.3f}'.format(args.class_name[k], self.meter.avg[k]))
+
+                print('Step: {} | {}; Epoch: {}\t'
+                      'Training Loss {:.3f}\t'
+                      'Train Prec {:.3%}\t'
+                      'Target Prec {:.3%}\t'
+                      .format(self.logger.global_step, len(train_loader), epoch, loss.data.cpu().numpy(),
+                              node_prec.data.cpu().numpy(), self.meter.avg[:-1].mean()))
+                self.meter.reset()
+        
+        # save model
+        states = {'model': self.model.state_dict(),
+                  'graph': self.gnnModel.state_dict(),
+                  'iteration': self.logger.global_step,
+                  'val_acc': node_prec,
+                  'optimizer': self.optimizer.state_dict()}
+        torch.save(states, osp.join(args.checkpoints_dir, '{}_step_{}.pth.tar'.format(args.experiment, step)))
+        self.meter.reset()
+    
+    def estimate_label(self):
+        args = self.args
+        print('label estimation...')
+        if args.dataset == 'visda':
+            test_data = Visda_Dataset(root=args.data_dir, partition='test', label_flag=self.label_flag, target_ratio=self.step*args.EF/100)
+        elif args.dataset == 'office':
+            test_data = Office_Dataset(root=args.data_dir, partition='test', label_flag=self.label_flag,
+                                       source=args.source_name, target=args.target_name, target_ratio=self.step*args.EF/100)
+        elif args.dataset == 'home':
+            test_data = Home_Dataset(root=args.data_dir, partition='test', label_flag=self.label_flag,
+                                     source=args.source_name, target=args.target_name, target_ratio=self.step*args.EF/100)
+        else:
+            raise Exception('Wrong Dataset!')
+
+        self.meter.reset()
+        # append labels and scores for target samples
+        pred_labels = list()
+        pred_scores = list()
+        real_labels = list()
+        target_loader = self.get_dataloader(test_data, training=False)
+        self.model.eval()
+        self.gnnModel.eval()
+        with tqdm(total=len(target_loader)) as pbar:
+            for i, (images, targets, target_labels, _, split) in enumerate(target_loader):
+                images = Variable(images, requires_grad=False).cuda()
+                targets = Variable(targets).cuda()
+                targets = self.transform_shape(targets.unsqueeze(-1)).squeeze(-1)
+
+                init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(targets)
+
+                # extract backbone features
+                features = self.model(images)
+                features = self.transform_shape(features)
+                torch.cuda.empty_cache()
+
+                edge_logits, node_logits = self.gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
+
+                del features
+                norm_node_logits = F.softmax(node_logits[-1], dim=-1)
+                target_score, target_pred = norm_node_logits[target_node_mask, :].max(1)
+
+                # only for debugging
+                target_labels = Variable(target_labels).cuda()
+                target_labels = self.transform_shape(target_labels.unsqueeze(-1)).view(-1)
+                pred = target_pred.detach().cpu()
+                target_prec = pred.eq(target_labels.detach().cpu()).double()
+
+                self.meter.update(
+                    target_labels.detach().cpu().view(-1).data.cpu().numpy(),
+                    target_prec.numpy()
+                )
+
+                pred_labels.append(target_pred.cpu().detach())
+                pred_scores.append(target_score.cpu().detach())
+                real_labels.append(target_labels.cpu().detach())
+
+                if i % self.args.log_step == 0:
+                    print('Step: {} | {}; \t'
+                          'OS Prec {:.3%}\t'
+                          .format(i, len(target_loader),
+                                  self.meter.avg.mean()))
+                pbar.update()
+
+        pred_labels = torch.cat(pred_labels)
+        pred_scores = torch.cat(pred_scores)
+        real_labels = torch.cat(real_labels)
+
+        self.model.train()
+        self.gnnModel.train()
+        self.num_to_select = int(len(target_loader)*self.args.batch_size*(self.args.num_class-1)*self.args.EF/100)
+
+        return pred_labels.data.cpu().numpy(), pred_scores.data.cpu().numpy(), real_labels.data.cpu().numpy()
