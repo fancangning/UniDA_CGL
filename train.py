@@ -52,7 +52,8 @@ def main(args):
 
     # setting experiment name
     label_flag = None
-    selected_idx = None
+    s_selected_idx = None
+    t_selected_idx = None
     args.experiment = set_exp_name(args)
     logger = Logger(args)
 
@@ -60,17 +61,17 @@ def main(args):
 
         for step in range(total_step):
             print('This is {}-th step with EF={}%'.format(step, args.EF))
-            trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, v=selected_idx, logger=logger)
+            trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, s_v=s_selected_idx, t_v=t_selected_idx, logger=logger)
 
             # train the model
             args.log_epoch = 4 + step // 2
             trainer.train(step, epochs=4+(step)*2, step_size=args.log_epoch)
 
-            # pseudo_label
-            pred_y, pred_score, pred_acc = trainer.estimate_label()
+            # transferability score
+            s_score, t_score = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
 
-            # select data from target to source
-            selected_idx = trainer.select_top_data(pred_score)
+            # select transferable source and target data
+            s_selected_idx, t_selected_idx = trainer.select_top_data(s_score, t_score)
 
             # add new data
             label_flag, data = trainer.generate_new_train_data(selected_idx, pred_y, pred_acc)
@@ -122,7 +123,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=1, metavar='S', help='random seed (default: 1)')
 
     parser.add_argument('-b', '--batch_size', type=int, default=4)
-    parser.add_argument('--threshold', type=float, default=0.1)
+    parser.add_argument('--s_threshold', type=float, default=0.0)
+    parser.add_argument('--t_threshold', type=float, default=0.0)
 
     parser.add_argument('--dropout', type=float, default=0.2)
     parser.add_argument('--EF', type=int, default=10)

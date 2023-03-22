@@ -15,7 +15,7 @@ from utils.loss import FocalLoss
 from models.component import Discriminator
 
 class ModelTrainer():
-    def __init__(self, args, data, step=0, label_flag=None, v=None, logger=None):
+    def __init__(self, args, data, step=0, label_flag=None, s_v=None, t_v=None, logger=None):
         self.args = args
         self.batch_size = args.batch_size
         self.data_workers = 6
@@ -26,7 +26,8 @@ class ModelTrainer():
 
         self.num_class = data.num_class
         self.num_task = args.batch_size
-        self.num_to_select = 0
+        self.s_num_to_select = 0
+        self.t_num_to_select = 0
 
         self.model = models.create(args.arch, args)
         self.model = nn.DataParallel(self.model).cuda()
@@ -36,7 +37,8 @@ class ModelTrainer():
         self.gnnModel = nn.DataParallel(self.gnnModel).cuda()
 
         self.meter = meter(args.num_class)
-        self.v = v
+        self.s_v = s_v
+        self.t_v = t_v
 
         # CE for node classification
         if args.loss == 'focal':
@@ -49,7 +51,8 @@ class ModelTrainer():
         self.global_step = 0
         self.logger = logger
         self.val_acc = 0
-        self.threshold = args.threshold
+        self.s_threshold = args.s_threshold
+        self.t_threshold = args.t_threshold
 
         if self.args.discriminator:
             self.discriminator = Discriminator(self.args.in_features)
@@ -253,75 +256,35 @@ class ModelTrainer():
         torch.save(states, osp.join(args.checkpoints_dir, '{}_step_{}.pth.tar'.format(args.experiment, step)))
         self.meter.reset()
     
-    def estimate_label(self):
-        args = self.args
-        print('label estimation...')
-        if args.dataset == 'visda':
-            test_data = Visda_Dataset(root=args.data_dir, partition='test', label_flag=self.label_flag, target_ratio=self.step*args.EF/100)
-        elif args.dataset == 'office':
-            test_data = Office_Dataset(root=args.data_dir, partition='test', label_flag=self.label_flag,
-                                       source=args.source_name, target=args.target_name, target_ratio=self.step*args.EF/100)
-        elif args.dataset == 'home':
-            test_data = Home_Dataset(root=args.data_dir, partition='test', label_flag=self.label_flag,
-                                     source=args.source_name, target=args.target_name, target_ratio=self.step*args.EF/100)
-        else:
-            raise Exception('Wrong Dataset!')
+    def select_top_data(self, s_score, t_score):
+        # select a set of transferable source and target samples to adapt
+        self.s_num_to_select = int(s_score.size()[0] / (100//self.args.EF))
+        self.t_num_to_select = int(t_score.size()[0] / (100//self.args.EF))
 
-        self.meter.reset()
-        # append labels and scores for target samples
-        pred_labels = list()
-        pred_scores = list()
-        real_labels = list()
-        target_loader = self.get_dataloader(test_data, training=False)
-        self.model.eval()
-        self.gnnModel.eval()
-        with tqdm(total=len(target_loader)) as pbar:
-            for i, (images, targets, target_labels, _, split) in enumerate(target_loader):
-                images = Variable(images, requires_grad=False).cuda()
-                targets = Variable(targets).cuda()
-                targets = self.transform_shape(targets.unsqueeze(-1)).squeeze(-1)
+        if self.s_v is None:
+            self.s_v = np.zeros(s_score.size()[0])
+        if self.t_v is None:
+            self.t_v = np.zeros(t_score.size()[0])
+        
+        s_unselected_idx = np.where(self.s_v==0)[0]
+        t_unselected_idx = np.where(self.t_v==0)[0]
 
-                init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(targets)
-
-                # extract backbone features
-                features = self.model(images)
-                features = self.transform_shape(features)
-                torch.cuda.empty_cache()
-
-                edge_logits, node_logits = self.gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
-
-                del features
-                norm_node_logits = F.softmax(node_logits[-1], dim=-1)
-                target_score, target_pred = norm_node_logits[target_node_mask, :].max(1)
-
-                # only for debugging
-                target_labels = Variable(target_labels).cuda()
-                target_labels = self.transform_shape(target_labels.unsqueeze(-1)).view(-1)
-                pred = target_pred.detach().cpu()
-                target_prec = pred.eq(target_labels.detach().cpu()).double()
-
-                self.meter.update(
-                    target_labels.detach().cpu().view(-1).data.cpu().numpy(),
-                    target_prec.numpy()
-                )
-
-                pred_labels.append(target_pred.cpu().detach())
-                pred_scores.append(target_score.cpu().detach())
-                real_labels.append(target_labels.cpu().detach())
-
-                if i % self.args.log_step == 0:
-                    print('Step: {} | {}; \t'
-                          'OS Prec {:.3%}\t'
-                          .format(i, len(target_loader),
-                                  self.meter.avg.mean()))
-                pbar.update()
-
-        pred_labels = torch.cat(pred_labels)
-        pred_scores = torch.cat(pred_scores)
-        real_labels = torch.cat(real_labels)
-
-        self.model.train()
-        self.gnnModel.train()
-        self.num_to_select = int(len(target_loader)*self.args.batch_size*(self.args.num_class-1)*self.args.EF/100)
-
-        return pred_labels.data.cpu().numpy(), pred_scores.data.cpu().numpy(), real_labels.data.cpu().numpy()
+        if max(s_score[s_unselected_idx]) > self.args.s_threshold:
+            if len(s_unselected_idx) < self.s_num_to_select:
+                self.s_num_to_select = len(s_unselected_idx)
+            index = np.argsort(-s_score[s_unselected_idx])
+            index_orig = s_unselected_idx[index]
+            num_pos = int(self.s_num_to_select)
+            for i in range(num_pos):
+                self.s_v[index_orig[i]] = 1
+        
+        if max(t_score[t_unselected_idx]) > self.args.t_threshold:
+            if len(t_unselected_idx) < self.t_num_to_select:
+                self.t_num_to_select = len(t_unselected_idx)
+            index = np.argsort(-t_score[t_unselected_idx])
+            index_orig = t_unselected_idx[index]
+            num_pos = int(self.t_num_to_select)
+            for i in range(num_pos):
+                self.t_v[index_orig[i]] = 1
+        
+        return self.s_v, self.t_v
