@@ -65,7 +65,7 @@ class Base_Dataset(data.Dataset):
         self.root = root
         self.partition = partition
         self.target_ratio = target_ratio
-        # self.target_ratio=0 no mixup
+        # self.target_ratio = 0 no mixup
         mean_pix = [0.485, 0.456, 0.406]
         std_pix = [0.229, 0.224, 0.225]
         normalize = transforms.Normalize(mean=mean_pix, std=std_pix)
@@ -81,14 +81,14 @@ class Base_Dataset(data.Dataset):
                                                    transforms.CenterCrop(224),
                                                    transforms.ToTensor(),
                                                    normalize])
-
+    
     def __len__(self):
 
         if self.partition == 'train':
             return int(min(sum(self.alpha), len(self.target_image)) / (self.num_class - 1))
         elif self.partition == 'test':
             return int(len(self.target_image) / (self.num_class - 1))
-
+    
     def __getitem__(self, item):
 
         image_data = []
@@ -99,11 +99,12 @@ class Base_Dataset(data.Dataset):
 
         domain_label = []
         ST_split = [] # Mask of targets to be evaluated
-        # select index for support class
+
+        v = []
         num_class_index_target = int(self.target_ratio * (self.num_class - 1))
 
         if self.target_ratio > 0:
-            available_index = [key for key in self.target_image_list.keys() if len(self.target_image_list[key]) > 0
+            available_index = [key for key in self.target_image_list.keys() if len(self.target_image_list[key]) > 0 
                                and key < self.num_class - 1]
             class_index_target = random.sample(available_index, min(num_class_index_target, len(available_index)))
 
@@ -113,10 +114,8 @@ class Base_Dataset(data.Dataset):
 
         for classes in class_index_source:
             # select support samples from source domain or target domain
-            # print('classes:', classes)
-            # print('type(self.source_image[classes]):', type(self.source_image[classes]))
-            # print('len(self.source_image[classes]):', (self.source_image[classes]))
-            image = Image.open(random.choice(self.source_image[classes])).convert('RGB')
+            random_idx = random.randint(0, len(self.source_image[classes])-1)
+            image = Image.open(self.source_image[classes][random_idx]).convert('RGB')
 
             if self.transformer is not None:
                 image = self.transformer(image)
@@ -124,10 +123,12 @@ class Base_Dataset(data.Dataset):
             label_data.append(classes)
             domain_label.append(1)
             ST_split.append(0)
+            v.append(self.s_v_dict[classes][random_idx])
             # target_real_label.append(classes)
         for classes in class_index_target:
             # select support samples from source domain or target domain
-            image = Image.open(random.choice(self.target_image_list[classes])).convert('RGB')
+            random_idx = random.randint(0, len(self.target_image_list[classes])-1)
+            image = Image.open(self.target_image_list[classes][random_idx]).convert('RGB')
 
             if self.transformer is not None:
                 image = self.transformer(image)
@@ -135,30 +136,27 @@ class Base_Dataset(data.Dataset):
             label_data.append(classes)
             domain_label.append(0)
             ST_split.append(0)
+            v.append(self.t_v_dict[classes][random_idx])
             # target_real_label.append(classes)
-
+        
         # adding target samples
         for i in range(self.num_class - 1):
 
             if self.partition == 'train':
                 if self.target_ratio > 0:
-                    index = random.choice(list(range(len(self.label_flag))))
+                    index = random.choice(list(range(self.label_flag)))
                 else:
                     index = random.choice(list(range(len(self.target_image))))
-                # index = random.choice(list(range(len(self.label_flag))))
                 target_image = Image.open(self.target_image[index]).convert('RGB')
                 if self.transformer is not None:
                     target_image = self.transformer(target_image)
                 image_data.append(target_image)
-                # print('self.label_flag[index]:', self.label_flag[index])
                 label_data.append(self.label_flag[index].item())
                 target_real_label.append(self.target_label[index])
                 domain_label.append(0)
                 ST_split.append(1)
+                v.append(self.t_v[index])
             elif self.partition == 'test':
-                # For last batch
-                # if item * (self.num_class - 1) + i >= len(self.target_image):
-                #     break
                 target_image = Image.open(self.target_image[item * (self.num_class - 1) + i]).convert('RGB')
                 if self.transformer is not None:
                     target_image = self.transformer(target_image)
@@ -167,16 +165,20 @@ class Base_Dataset(data.Dataset):
                 target_real_label.append(self.target_label[item * (self.num_class - 1) + i])
                 domain_label.append(0)
                 ST_split.append(1)
+                v.append(self.t_v[item * (self.num_class - 1) + i])
         image_data = torch.stack(image_data)
-        # print('label_data:', label_data)
         label_data = torch.LongTensor(label_data)
         real_label_data = torch.tensor(target_real_label)
         domain_label = torch.tensor(domain_label)
         ST_split = torch.tensor(ST_split)
-        return image_data, label_data, real_label_data, domain_label, ST_split
-
+        v = torch.tensor(v)
+        return image_data, label_data, real_label_data, domain_label, ST_split, v
+    
     def load_dataset(self):
-        source_image_list = {key: [] for key in range(self.num_class - 1)}
+        if self.s_v is None:
+            self.s_v = torch.zeros(len(open(self.source_path, 'r').readlines()))
+        s_v_dict = {key: [] for key in range(self.num_class-1)}
+        source_image_list = {key: [] for key in range(self.num_class-1)}
         target_image_list = []
         target_label_list = []
         with open(self.source_path) as f:
@@ -186,56 +188,63 @@ class Base_Dataset(data.Dataset):
                 if label == str(self.num_class-1):
                     continue
                 source_image_list[int(label)].append(image_dir)
-                # source_image_list.append(image_dir)
-
+                s_v_dict[int(label)].append(self.s_v[ind])
+        
         with open(self.target_path) as f:
             for ind, line in enumerate(f.readlines()):
                 image_dir, label = line.split(' ')
                 label = label.strip()
-                # target_image_list[int(label)].append(image_dir)
                 target_image_list.append(image_dir)
                 target_label_list.append(int(label))
-
-        return source_image_list, target_image_list, target_label_list
-
+        
+        return source_image_list, s_v_dict, target_image_list, target_label_list
 
 class Office_Dataset(Base_Dataset):
 
-    def __init__(self, root, partition, label_flag=None, source='A', target='W', target_ratio=0.0):
+    def __init__(self, root, partition, s_v=None, t_v=None, label_flag=None, source='A', target='W', target_ratio=0.0):
         super(Office_Dataset, self).__init__(root, partition, target_ratio)
         # set dataset info
         src_name, tar_name = self.getFilePath(source, target)
         self.source_path = os.path.join(root, src_name)
         self.target_path = os.path.join(root, tar_name)
-        self.class_name = ["back_pack", "bike", "calculator", "headphones", "keyboard", 
-                            "laptop_computer", "monitor", "mouse", "mug", "projector", "unk"]
+        self.class_name = ['back_pack', 'bike', 'calculator', 'headphones', 'keyboard',
+                           'laptop_computer', 'monitor', 'mouse', 'mug', 'projector', 'unk']
         self.num_class = len(self.class_name)
+        self.s_v = s_v
         # self.source_image is a dict, and self.target_image and self.target_label are lists.
-        self.source_image, self.target_image, self.target_label = self.load_dataset()
-        self.alpha = [len(self.source_image[key]) for key in self.source_image.keys()]
+        self.source_image, self.s_v_dict, self.target_image, self.target_label = self.load_dataset()
+        self.alpha = [len(self.source_image(key)) for key in self.source_image.keys()]
         self.label_flag = label_flag
-        
-        # print('label_flag: ', label_flag)
+        self.t_v = t_v
         # create the unlabeled tag
         if self.label_flag is None:
             # self.label_flag initialization [11, 11, 11, ...]
-            self.label_flag = torch.ones(len(self.target_image)) * self.num_class
-
+            self.label_flag = torch.ones(len(self.target_image))*self.num_class
         else:
-            # if pseudo label comes
-            self.target_image_list = {key: [] for key in range(self.num_class + 1)}
+            # if pseudo labels come
+            self.target_image_list = {key: [] for key in range(self.num_class+1)}
             for i in range(len(self.label_flag)):
                 self.target_image_list[self.label_flag[i].item()].append(self.target_image[i])
-
+        # create the t_v_dict
+        if self.t_v is None:
+            # self.t_v initialization [0, 0, 0, ...]
+            self.t_v = torch.zeros(len(self.target_image))
+        else:
+            # create the t_v_dict
+            assert len(self.t_v) == len(self.label_flag)
+            self.t_v_dict = {key: [] for key in range(self.num_class+1)}
+            for i in range(len(self.t_v)):
+                self.t_v_dict[self.label_flag[i].item()].append(self.t_v[i])
+        
         if self.target_ratio > 0:
-            self.alpha_value = [len(self.source_image[key]) + len(self.target_image_list[key]) for key in self.source_image.keys()]
+            self.alpha_value = [len(self.source_image[key])+len(self.target_image_list[key]) for key in self.source_image.keys()]
         else:
             self.alpha_value = self.alpha
-
+        
         self.alpha_value = np.array(self.alpha_value)
         self.alpha_value = (self.alpha_value.max() + 1 - self.alpha_value) / self.alpha_value.mean()
         self.alpha_value = torch.tensor(self.alpha_value).float().cuda()
-
+    
     def getFilePath(self, source, target):
 
         if source == 'A':
@@ -245,7 +254,7 @@ class Office_Dataset(Base_Dataset):
         elif source == 'D':
             src_name = 'source_dslr_oda.txt'
         else:
-            print("Unknown Source Type, only supports A W D.")
+            print('Unknown Source Type, only supports A W D.')
 
         if target == 'A':
             tar_name = 'target_amazon_oda.txt'
@@ -254,10 +263,10 @@ class Office_Dataset(Base_Dataset):
         elif target == 'D':
             tar_name = 'target_dslr_oda.txt'
         else:
-            print("Unknown Target Type, only supports A W D.")
-
+            print('Unknown Target Type, only supports A W D.')
+        
         return src_name, tar_name
-    
+        
     def label2edge(self, targets):
         
         # targets.size(): [1, 80]
@@ -298,6 +307,7 @@ class Office_Dataset(Base_Dataset):
 
         s_score = list()
         t_score = list()
+        pred_labels = list()
 
         model.eval()
         gnnModel.eval()
@@ -333,126 +343,19 @@ class Office_Dataset(Base_Dataset):
                 domain_pred = discriminator_no_back(features)
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
+                _, target_pred = norm_node_logits.max(1)
                 score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
 
                 score = domain_pred - score / (self.num_class - 1)
                 t_score.append(score.cpu().detach())
+                pred_labels.append(target_pred.cpu().detach())
         
         s_score = torch.cat(s_score)
         t_score = torch.cat(t_score)
+        pred_labels = torch.cat(pred_labels)
 
         model.train()
         gnnModel.train()
         discriminator_no_back.train()
 
-        return s_score, t_score
-
-
-
-class Home_Dataset(Base_Dataset):
-    def __init__(self, root, partition, label_flag=None, source='A', target='R', target_ratio=0.0):
-        super(Home_Dataset, self).__init__(root, partition, target_ratio)
-        src_name, tar_name = self.getFilePath(source, target)
-        self.source_path = os.path.join(root, src_name)
-        self.target_path = os.path.join(root, tar_name)
-        self.class_name = ['Alarm_Clock', 'Backpack', 'Batteries', 'Bed', 'Bike', 'Bottle', 'Bucket', 'Calculator',
-                           'Calendar', 'Candles', 'Chair', 'Clipboards', 'Computer', 'Couch', 'Curtains', 'Desk_Lamp',
-                           'Drill', 'Eraser', 'Exit_Sign', 'Fan', 'File_Cabinet', 'Flipflops', 'Flowers', 'Folder',
-                           'Fork', 'unk']
-        self.num_class = len(self.class_name)
-
-        self.source_image, self.target_image, self.target_label = self.load_dataset()
-        self.alpha = [len(self.source_image[key]) for key in self.source_image.keys()]
-        self.label_flag = label_flag
-
-        # create the unlabeled tag
-        if self.label_flag is None:
-            self.label_flag = torch.ones(len(self.target_image)) * self.num_class
-
-        else:
-            # if pseudo label comes
-            self.target_image_list = {key: [] for key in range(self.num_class + 1)}
-            for i in range(len(self.label_flag)):
-                self.target_image_list[self.label_flag[i].item()].append(self.target_image[i])
-
-        # if self.target_ratio > 0:
-        #     self.alpha_value = [len(self.source_image[key]) + len(self.target_image_list[key]) for key in
-        #                         self.source_image.keys()]
-        # else:
-        #     self.alpha_value = self.alpha
-        #
-        # self.alpha_value = np.array(self.alpha_value)
-        # self.alpha_value = (self.alpha_value.max() + 1 - self.alpha_value) / self.alpha_value.mean()
-        # self.alpha_value = torch.tensor(self.alpha_value).float().cuda()
-
-    def getFilePath(self, source, target):
-
-        if source == 'A':
-            src_name = 'art_source.txt'
-        elif source == 'C':
-            src_name = 'clip_source.txt'
-        elif source == 'P':
-            src_name = 'product_source.txt'
-        elif source == 'R':
-            src_name = 'real_source.txt'
-        else:
-            print("Unknown Source Type, only supports A C P R.")
-
-        if target == 'A':
-            tar_name = 'art_tar.txt'
-        elif target == 'C':
-            tar_name = 'clip_tar.txt'
-        elif target == 'P':
-            tar_name = 'product_tar.txt'
-        elif target == 'R':
-            tar_name = 'real_tar.txt'
-        else:
-            print("Unknown Target Type, only supports A C P R.")
-
-        return src_name, tar_name
-
-
-class Visda_Dataset(Base_Dataset):
-    def __init__(self, root, partition, label_flag=None, target_ratio=0.0):
-        super(Visda_Dataset, self).__init__(root, partition, target_ratio)
-        # set dataset info
-        self.source_path = os.path.join(root, 'source_list.txt')
-        self.target_path = os.path.join(root, 'target_list.txt')
-        self.class_name = ["bicycle", "bus", "car", "motorcycle", "train", "truck", 'unk']
-        self.num_class = len(self.class_name)
-        self.source_image, self.target_image, self.target_label = self.load_dataset()
-        self.alpha = [len(self.source_image[key]) for key in self.source_image.keys()]
-        self.label_flag = label_flag
-
-        # create the unlabeled tag
-        if self.label_flag is None:
-            self.label_flag = torch.ones(len(self.target_image)) * self.num_class
-
-        else:
-            # if pseudo label comes
-            self.target_image_list = {key: [] for key in range(self.num_class + 1)}
-            for i in range(len(self.label_flag)):
-                self.target_image_list[self.label_flag[i].item()].append(self.target_image[i])
-
-class Visda18_Dataset(Base_Dataset):
-    def __init__(self, root, partition, label_flag=None, target_ratio=0.0):
-        super(Visda18_Dataset, self).__init__(root, partition, target_ratio)
-        # set dataset info
-        self.source_path = os.path.join(root, 'source_list_k.txt')
-        self.target_path = os.path.join(root, 'target_list.txt')
-        self.class_name = ["areoplane","bicycle", "bus", "car", "horse", "knife", "motorcycle", "person", "plant",
-                           "skateboard", "train", "truck", 'unk']
-        self.num_class = len(self.class_name)
-        self.source_image, self.target_image, self.target_label = self.load_dataset()
-        self.alpha = [len(self.source_image[key]) for key in self.source_image.keys()]
-        self.label_flag = label_flag
-
-        # create the unlabeled tag
-        if self.label_flag is None:
-            self.label_flag = torch.ones(len(self.target_image)) * self.num_class
-
-        else:
-            # if pseudo label comes
-            self.target_image_list = {key: [] for key in range(self.num_class + 1)}
-            for i in range(len(self.label_flag)):
-                self.target_image_list[self.label_flag[i].item()].append(self.target_image[i])
+        return s_score, t_score, pred_labels

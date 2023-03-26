@@ -288,3 +288,24 @@ class ModelTrainer():
                 self.t_v[index_orig[i]] = 1
         
         return self.s_v, self.t_v
+
+    def generate_new_train_data(self, s_v, t_v, pred_y):
+        # create the new dataset merged with pseudo labels
+        assert len(t_v) == len(pred_y)
+        new_label_flag = list()
+        for i, flag in enumerate(t_v):
+            if flag > 0:
+                new_label_flag.append(pred_y[i])
+            elif flag == 0:
+                # assign the <unk> pseudo label
+                new_label_flag.append(self.args.num_class)
+            else:
+                raise Exception('Wrong t_v element, 0 or 1 is right')
+        new_label_flag = torch.tensor(new_label_flag)
+
+        # update source data
+        if self.args.dataset == 'office':
+            new_data = Office_Dataset(root=self.args.data_dir, partition='train', s_v=s_v, t_v=t_v,
+                                       label_flag=new_label_flag, source=self.args.source_name, 
+                                       target=self.args.target_name, target_ratio=(self.step+1)*self.args.EF/100)
+        return new_label_flag, new_data

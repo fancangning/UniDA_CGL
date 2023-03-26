@@ -68,13 +68,13 @@ def main(args):
             trainer.train(step, epochs=4+(step)*2, step_size=args.log_epoch)
 
             # transferability score
-            s_score, t_score = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
+            s_score, t_score, pred_y = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
 
             # select transferable source and target data
             s_selected_idx, t_selected_idx = trainer.select_top_data(s_score, t_score)
 
             # add new data
-            label_flag, data = trainer.generate_new_train_data(selected_idx, pred_y, pred_acc)
+            label_flag, data = trainer.generate_new_train_data(s_selected_idx, t_selected_idx, pred_y)
     else:
         # load trained weights
         trainer = ModelTrainer(args=args, data=data)
