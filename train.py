@@ -67,6 +67,9 @@ def main(args):
             args.log_epoch = 4 + step // 2
             trainer.train(step, epochs=4+(step)*2, step_size=args.log_epoch)
 
+            # test the model
+            h_score, known_acc, unknown_acc = trainer.test()
+
             # transferability score
             s_score, t_score, pred_y = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
 
@@ -115,6 +118,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--source_name', type=str, default='A')
     parser.add_argument('--target_name', type=str, default='W')
+
+    parser.add_argument('--source_class_num', type=int, default=10, help='the number of source classes')
+    parser.add_argument('--shared_class_num', type=int, default=10, help='the number of shared classes')
 
     parser.add_argument('--eval_log_step', type=int, default=100)
     parser.add_argument('--test_interval', type=int, default=1500)
