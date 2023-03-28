@@ -113,7 +113,7 @@ class Base_Dataset(data.Dataset):
         random.shuffle(class_index_source)
 
         for classes in class_index_source:
-            # select support samples from source domain or target domain
+            # select support samples from source domain
             random_idx = random.randint(0, len(self.source_image[classes])-1)
             image = Image.open(self.source_image[classes][random_idx]).convert('RGB')
 
@@ -126,7 +126,7 @@ class Base_Dataset(data.Dataset):
             v.append(self.s_v_dict[classes][random_idx])
             # target_real_label.append(classes)
         for classes in class_index_target:
-            # select support samples from source domain or target domain
+            # select support samples from target domain
             random_idx = random.randint(0, len(self.target_image_list[classes])-1)
             image = Image.open(self.target_image_list[classes][random_idx]).convert('RGB')
 
@@ -144,7 +144,7 @@ class Base_Dataset(data.Dataset):
 
             if self.partition == 'train':
                 if self.target_ratio > 0:
-                    index = random.choice(list(range(self.label_flag)))
+                    index = random.choice(list(range(len(self.label_flag))))
                 else:
                     index = random.choice(list(range(len(self.target_image))))
                 target_image = Image.open(self.target_image[index]).convert('RGB')
@@ -201,15 +201,15 @@ class Base_Dataset(data.Dataset):
 
 class Office_Dataset(Base_Dataset):
 
-    def __init__(self, root, partition, s_v=None, t_v=None, label_flag=None, source='A', target='W', target_ratio=0.0):
+    def __init__(self, root, partition, s_v=None, t_v=None, label_flag=None, source='A', target='W', target_ratio=0.0, class_num=10):
         super(Office_Dataset, self).__init__(root, partition, target_ratio)
         # set dataset info
         src_name, tar_name = self.getFilePath(source, target)
         self.source_path = os.path.join(root, src_name)
         self.target_path = os.path.join(root, tar_name)
-        self.class_name = ['back_pack', 'bike', 'calculator', 'headphones', 'keyboard',
-                           'laptop_computer', 'monitor', 'mouse', 'mug', 'projector', 'unk']
-        self.num_class = len(self.class_name)
+        # self.class_name = ['back_pack', 'bike', 'calculator', 'headphones', 'keyboard',
+        #                    'laptop_computer', 'monitor', 'mouse', 'mug', 'projector', 'unk']
+        self.num_class = class_num + 1
         self.s_v = s_v
         # self.source_image is a dict, and self.target_image and self.target_label are lists.
         self.source_image, self.s_v_dict, self.target_image, self.target_label = self.load_dataset()

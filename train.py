@@ -5,11 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 # torch-related packages
 import torch
-from utils.visualization import visualize_TSNE
 # data-related packages
-from data_loader import Visda_Dataset, Office_Dataset, Home_Dataset
+from data_loader import Office_Dataset
 from model_trainer import ModelTrainer
-from utils.logger import Logger
 
 torch.cuda.set_device(0)
 
@@ -30,23 +28,13 @@ def main(args):
         os.makedirs(args.logs_dir)
     
     # initialize dataset
-    if args.dataset == 'visda':
-        args.data_dir = os.path.join(args.data_dir, 'visda')
-        data = Visda_Dataset(root=args.data_dir, partition='train', label_flag=None)
-
-    elif args.dataset == 'office':
+    if args.dataset == 'office':
         args.data_dir = os.path.join(args.data_dir, 'office31')
-        data = Office_Dataset(root=args.data_dir, partition='train', label_flag=None, source=args.source_name,
-                              target=args.target_name)
-
-    elif args.dataset == 'home':
-        args.data_dir = os.path.join(args.data_dir, 'OfficeHome')
-        data = Home_Dataset(root=args.data_dir, partition='train', label_flag=None, source=args.source_name,
-                              target=args.target_name)
+        data = Office_Dataset(root=args.data_dir, partition='train', s_v=None, t_v=None, label_flag=None, source=args.source_name, 
+                              target=args.target_name, class_num=args.source_class_num)
     else:
         print('Unknown dataset!')
 
-    args.class_name = data.class_name
     args.num_class = data.num_class
     args.alpha = data.alpha
 
@@ -55,13 +43,12 @@ def main(args):
     s_selected_idx = None
     t_selected_idx = None
     args.experiment = set_exp_name(args)
-    logger = Logger(args)
 
     if not args.visualization:
 
         for step in range(total_step):
             print('This is {}-th step with EF={}%'.format(step, args.EF))
-            trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, s_v=s_selected_idx, t_v=t_selected_idx, logger=logger)
+            trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, s_v=s_selected_idx, t_v=t_selected_idx, logger=None)
 
             # train the model
             args.log_epoch = 4 + step // 2
@@ -69,6 +56,8 @@ def main(args):
 
             # test the model
             h_score, known_acc, unknown_acc = trainer.test()
+
+            print('The '+str(step)+' step of total '+str(total_step-1)+' step, h_score: '+str(h_score)+' known_acc: '+str(known_acc)+' unknown_acc: '+str(unknown_acc))
 
             # transferability score
             s_score, t_score, pred_y = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
@@ -80,17 +69,12 @@ def main(args):
             label_flag, data = trainer.generate_new_train_data(s_selected_idx, t_selected_idx, pred_y)
     else:
         # load trained weights
-        trainer = ModelTrainer(args=args, data=data)
-        trainer.load_model_weight(args.checkpoint_path)
-        feat, node_feat, target_labels, split = trainer.extracter_feature()
-        visualize_TSNE(node_feat, target_labels, args.num_class, args, split)
-
-        plt.savefig('./node_tsne.png', dpi=300)
+        raise Exception('visualization has not been completed')
 
 
 def set_exp_name(args):
     exp_name = 'D-{}'.format(args.dataset)
-    if args.dataset == 'office' or args.dataset == 'home':
+    if args.dataset == 'office':
         exp_name += '_src-{}_tar-{}'.format(args.source_name, args.target_name)
     exp_name += '_A-{}'.format(args.arch)
     exp_name += '_L-{}'.format(args.num_layers)
@@ -108,7 +92,7 @@ if __name__ == '__main__':
 
     # set up path
     working_dir = os.path.dirname(os.path.abspath(__file__))
-    parser.add_argument('--data_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'txt/'))
+    parser.add_argument('--data_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'txt'))
     parser.add_argument('--logs_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'logs'))
     parser.add_argument('--checkpoints_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'checkpoints'))
 
@@ -155,7 +139,7 @@ if __name__ == '__main__':
 
     #tsne
     parser.add_argument('--visualization', type=bool, default=False)
-    parser.add_argument('--checkpoint_path', type=str, default='/home/Desktop/Open_DA_git/checkpoints/D-visda18_A-res_L-1_E-20_B-4_step_1.pth.tar')
+    parser.add_argument('--checkpoint_path', type=str, default='./checkpoints/D-visda18_A-res_L-1_E-20_B-4_step_1.pth.tar')
 
     #Discrminator
     parser.add_argument('--discriminator', type=bool, default=True)
