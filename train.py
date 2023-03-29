@@ -42,16 +42,20 @@ def main(args):
     label_flag = None
     s_selected_idx = None
     t_selected_idx = None
+    # args.experiment is a str
     args.experiment = set_exp_name(args)
 
     if not args.visualization:
-
+        # total_step = 100 // args.EF
         for step in range(total_step):
             print('This is {}-th step with EF={}%'.format(step, args.EF))
-            trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, s_v=s_selected_idx, t_v=t_selected_idx, logger=None)
+            trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, 
+                                   s_v=s_selected_idx, t_v=t_selected_idx, logger=None)
 
             # train the model
+            # args.log_epoch 4 4 5 5 6 6 7 7 8 8
             args.log_epoch = 4 + step // 2
+            # epochs 4 6 8 10 12 14 16 18 20 22 24
             trainer.train(step, epochs=4+(step)*2, step_size=args.log_epoch)
 
             # test the model

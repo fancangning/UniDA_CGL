@@ -56,6 +56,7 @@ class ModelTrainer():
         self.s_threshold = args.s_threshold
         self.t_threshold = args.t_threshold
 
+        # Discriminator
         if self.args.discriminator:
             self.discriminator = Discriminator(self.args.in_features)
             self.discriminator = nn.DataParallel(self.discriminator).cuda()
@@ -112,7 +113,7 @@ class ModelTrainer():
 
         # change the learning rate
         if args.arch == 'res':
-            if args.dataset == 'visda' or args.dataset == 'office':
+            if args.dataset == 'office':
                 param_groups = [
                     {'params': self.model.module.CNN.parameters(), 'lr_mult': 0.01},
                     {'params': self.gnnModel.parameters(), 'lr_mult': 0.1},
@@ -121,13 +122,7 @@ class ModelTrainer():
                     param_groups.append({'params': self.discriminator.parameters(), 'lr_mult': 0.1})
                     param_groups.append({'params': self.discriminator_no_back.parameters(), 'lr_mult': 0.1})
             else:
-                param_groups = [
-                    {'params': self.model.module.CNN.parameters(), 'lr_mult': 0.05},
-                    {'params': self.gnnModel.parameters(), 'lr_mult': 0.8},
-                ]
-                if self.args.discriminator:
-                    param_groups.append({'params': self.discriminator.parameters(), 'lr_mult': 0.8})
-                    param_groups.append({'params': self.discriminator_no_back.parameters(), 'lr_mult': 0.8})
+                raise Exception('Wrong architecture!')
             
             args.in_features = 2048
         else:
