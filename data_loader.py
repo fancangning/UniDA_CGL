@@ -213,7 +213,7 @@ class Office_Dataset(Base_Dataset):
         self.s_v = s_v
         # self.source_image is a dict, and self.target_image and self.target_label are lists.
         self.source_image, self.s_v_dict, self.target_image, self.target_label = self.load_dataset()
-        self.alpha = [len(self.source_image(key)) for key in self.source_image.keys()]
+        self.alpha = [len(self.source_image[key]) for key in self.source_image.keys()]
         self.label_flag = label_flag
         self.t_v = t_v
         # create the unlabeled tag

@@ -6,6 +6,7 @@ from torchvision import transforms
 import models
 from torch.utils.data import DataLoader
 
+import os
 import os.path as osp
 from tqdm import tqdm
 from torch.autograd import Variable
@@ -51,7 +52,6 @@ class ModelTrainer():
         # BCE for edge
         self.criterion = nn.BCELoss(reduction='mean').cuda()
         self.global_step = 0
-        self.logger = logger
         self.val_acc = 0
         self.s_threshold = args.s_threshold
         self.t_threshold = args.t_threshold
@@ -141,25 +141,34 @@ class ModelTrainer():
             with tqdm(total=len(train_loader)) as pbar:
                 for i, inputs in enumerate(train_loader):
 
+                    # images.size(): [4, 20, 3, 224, 224] targets.size(): [4, 20]
                     images = Variable(inputs[0], requires_grad=False).cuda()
                     targets = Variable(inputs[1]).cuda()
 
+                    # targets_DT.size(): [40]
                     targets_DT = targets[:, args.num_class-1:].reshape(-1)
 
                     if self.args.discriminator:
+                        # domain_label.size(): [4, 20]
                         domain_label = Variable(inputs[3].float()).cuda()
                     
+                    # targets.size() [4, 20]-> [4, 20, 1] -> [1, 80, 1] -> [1, 80]
                     targets = self.transform_shape(targets.unsqueeze(-1)).squeeze(-1)
 
+                    # init_edge.size(): [1, 80, 80] target_edge_mask.size(): [1, 80, 80] source_edge_mask.size(): [1, 80, 80] 
+                    # target_node_mask.size(): [1, 80] source_node_mask.size(): [1, 80]
                     init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(targets)
 
+                    # features.size(): [4, 20, 2048]
                     features = self.model(images)
-
+                    # features.size(): [4, 20, 2048] -> [1, 80, 2048]
                     features = self.transform_shape(features)
 
+                    # edge_logits[0].size(): [1, 80, 80] node_logits[0].size(): [1, 80, 10]
                     edge_logits, node_logits = self.gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
 
                     full_edge_loss = [self.criterion(edge_logit.masked_select(source_edge_mask), init_edge.masked_select(source_edge_mask)) for edge_logit in edge_logits]
+                    # norm_node_logits.size(): [1, 80, 10]
                     norm_node_logits = F.softmax(node_logits[-1], dim=-1)
 
                     if args.loss == 'nll':
@@ -168,7 +177,6 @@ class ModelTrainer():
                     elif args.loss == 'focal':
                         source_node_loss = self.criterionCE(norm_node_logits[source_node_mask, :],
                                                             targets.masked_select(source_node_mask))
-                    
                     edge_loss = 0
                     for l in range(args.num_layers - 1):
                         edge_loss += full_edge_loss[l] * 0.5
@@ -179,7 +187,7 @@ class ModelTrainer():
                     if self.args.discriminator:
                         unk_label_mask = torch.eq(targets, args.num_class-1).squeeze()
                         domain_pred = self.discriminator(features)
-                        domain_pred_no_back = self.discriminator_no_back(features, eta=0.0)
+                        domain_pred_no_back = self.discriminator_no_back(x=features, eta=0.0)
                         temp = torch.squeeze(domain_pred)[~unk_label_mask]
                         domain_loss = self.criterion(temp, domain_label.view(-1)[~unk_label_mask])
                         domain_loss_no_back = self.criterion(torch.squeeze(domain_pred_no_back), domain_label.view(-1))
@@ -218,14 +226,6 @@ class ModelTrainer():
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
-
-                    self.logger.global_step += 1
-
-                    if self.args.discriminator:
-                        self.logger.log_scalar('train/domain_loss', domain_loss, self.logger.global_step)
-                        self.logger.log_scalar('train/domain_loss_no_back', domain_loss_no_back, self.logger.global_step)
-                    self.logger.log_scalar('train/node_prec', node_prec, self.logger.global_step)
-                    self.logger.log_scalar('train/edge_loss', edge_loss, self.logger.global_step)
                     
                     pbar.update()
                     if i > 150:
@@ -233,21 +233,19 @@ class ModelTrainer():
 
             if (epoch + 1) % args.log_epoch == 0:
                 print('----Start Epoch {} Training --------'.format(epoch))
-                for k in range(args.num_class - 1):
-                    print('Target {} Precision: {:.3f}'.format(args.class_name[k], self.meter.avg[k]))
 
                 print('Step: {} | {}; Epoch: {}\t'
                       'Training Loss {:.3f}\t'
                       'Train Prec {:.3%}\t'
                       'Target Prec {:.3%}\t'
-                      .format(self.logger.global_step, len(train_loader), epoch, loss.data.cpu().numpy(),
+                      .format(epoch, len(train_loader), epoch, loss.data.cpu().numpy(),
                               node_prec.data.cpu().numpy(), self.meter.avg[:-1].mean()))
                 self.meter.reset()
         
         # save model
         states = {'model': self.model.state_dict(),
                   'graph': self.gnnModel.state_dict(),
-                  'iteration': self.logger.global_step,
+                  'iteration': step,
                   'val_acc': node_prec,
                   'optimizer': self.optimizer.state_dict()}
         torch.save(states, osp.join(args.checkpoints_dir, '{}_step_{}.pth.tar'.format(args.experiment, step)))
