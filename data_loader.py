@@ -314,13 +314,13 @@ class Office_Dataset(Base_Dataset):
         discriminator_no_back.eval()
         for batch_idx, (img, label) in enumerate(source_loader):
             img, label = img.cuda(), label.cuda()
+            img = img.unsqueeze(0)
             label = label.squeeze().unsqueeze(0)
 
             init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(label)
 
             with torch.no_grad():
                 features = model(img)
-                features = features.unsqueeze(0)
                 edge_logits, node_logits = gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
                 domain_pred = discriminator_no_back(features)
 
@@ -328,28 +328,27 @@ class Office_Dataset(Base_Dataset):
                 score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
 
                 score = score / (self.num_class - 1) - domain_pred
-                s_score.append(score.cpu().detach())
+                s_score.append(score[0].cpu().detach())
         
         for batch_idx, (img, label) in enumerate(target_loader):
             img, label = img.cuda(), label.cuda()
+            img = img.unsqueeze(0)
             label = label.squeeze().unsqueeze(0)
 
             init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(label)
 
             with torch.no_grad():
                 features = model(img)
-                features = features.unsqueeze(0)
                 edge_logits, node_logits = gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
                 domain_pred = discriminator_no_back(features)
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
-                _, target_pred = norm_node_logits.max(1)
+                _, target_pred = norm_node_logits.max(-1)
                 score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
 
                 score = domain_pred - score / (self.num_class - 1)
-                t_score.append(score.cpu().detach())
-                pred_labels.append(target_pred.cpu().detach())
-        
+                t_score.append(score[0].cpu().detach())
+                pred_labels.append(target_pred[0].cpu().detach())
         s_score = torch.cat(s_score)
         t_score = torch.cat(t_score)
         pred_labels = torch.cat(pred_labels)
@@ -357,5 +356,8 @@ class Office_Dataset(Base_Dataset):
         model.train()
         gnnModel.train()
         discriminator_no_back.train()
-
+        
+        print('s_score.size(): ', s_score.size())
+        print('t_score.size(): ', t_score.size())
+        print('pred_labels.size(): ', pred_labels.size())
         return s_score, t_score, pred_labels

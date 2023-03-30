@@ -59,18 +59,18 @@ def main(args):
             trainer.train(step, epochs=4+(step)*2, step_size=args.log_epoch)
 
             # test the model
-            # h_score, known_acc, unknown_acc = trainer.test()
+            h_score, known_acc, unknown_acc = trainer.test(data.target_path)
 
-            # print('The '+str(step)+' step of total '+str(total_step-1)+' step, h_score: '+str(h_score)+' known_acc: '+str(known_acc)+' unknown_acc: '+str(unknown_acc))
+            print('The '+str(step)+' step of total '+str(total_step-1)+' step, h_score: '+str(h_score)+' known_acc: '+str(known_acc)+' unknown_acc: '+str(unknown_acc))
 
             # transferability score
-            # s_score, t_score, pred_y = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
+            s_score, t_score, pred_y = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
 
             # select transferable source and target data
-            # s_selected_idx, t_selected_idx = trainer.select_top_data(s_score, t_score)
+            s_selected_idx, t_selected_idx = trainer.select_top_data(s_score, t_score)
 
             # add new data
-            # label_flag, data = trainer.generate_new_train_data(s_selected_idx, t_selected_idx, pred_y)
+            label_flag, data = trainer.generate_new_train_data(s_selected_idx, t_selected_idx, pred_y)
     else:
         # load trained weights
         raise Exception('visualization has not been completed')

@@ -310,25 +310,25 @@ class ModelTrainer():
 
         with torch.no_grad():
                 features = self.model(img)
-                features = features.unsqueeze(0)
                 edge_logits, node_logits = self.gnnModel(init_node_feat=features, init_edge_feat=init_edge, target_mask=target_edge_mask)
                 domain_pred = self.discriminator_no_back(features)
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
-                _, target_pred = norm_node_logits.max(1)
+                _, target_pred = norm_node_logits.max(-1)
                 score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
 
+                # domain_pred.size(): [1, 32] score: [1, 32]
                 score = domain_pred - score / (self.num_class - 1)
         return score
 
-    def test(self):
+    def test(self, target_path):
         mean_pix = [0.485, 0.456, 0.406]
         std_pix = [0.229, 0.224, 0.225]
         transformer = transforms.Compose([transforms.Resize(256),
                                           transforms.CenterCrop(224),
                                           transforms.ToTensor(),
                                           transforms.Normalize(mean=mean_pix, std=std_pix)])
-        target_folder = ImageFolder(self.target_path, transform=transformer)
+        target_folder = ImageFolder(target_path, transform=transformer)
         target_loader = data.DataLoader(target_folder, batch_size=32, shuffle=False, drop_last=False, num_workers=4)
 
         self.model.eval()
@@ -341,23 +341,23 @@ class ModelTrainer():
         for batch_idx, (img, label) in enumerate(target_loader):
             print('num_iter: ', batch_idx)
             img, label = img.cuda(), label.cuda()
+            img = img.unsqueeze(0)
             label = label.squeeze().unsqueeze(0)
             score = self.get_transferability_score_batch(img, label)
             init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(label)
             with torch.no_grad():
                 fea = self.model(img)
-                fea = fea.unsqueeze(0)
                 edge_logits, node_logits = self.gnnModel(init_node_feat=fea, init_edge_feat=init_edge, target_mask=target_edge_mask)
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
 
                 if batch_idx == 0:
-                    open_class = int(norm_node_logits.size(1))
+                    open_class = int(norm_node_logits.size(-1))
                     class_list.append(open_class)
                 
-                pred = norm_node_logits.data.max(1)[1]
+                pred = norm_node_logits.data.max(-1)[1]
                 print('pred: ', pred)
-                ind_unk = np.where(score.cpu() < self.args.t_threshold)[0]
+                ind_unk = np.where(score.squeeze().cpu() < self.args.t_threshold)[0]
                 print('score: ', score.cpu())
                 print('ind_unk: ', ind_unk)
                 pred[ind_unk] = open_class
@@ -365,8 +365,10 @@ class ModelTrainer():
                 print('label: ', label)
                 pred = pred.cpu().numpy()
                 for i, t in enumerate(class_list):
-                    t_ind = np.where(label.data.cpu().numpy()==t)
-                    correct_ind = np.where(pred[t_ind[0]]==t)
+                    t_ind = np.where(label.squeeze().data.cpu().numpy()==t)
+                    correct_ind = np.where(pred.squeeze()[t_ind[0]]==t)
+                    # print('t_ind: ', t_ind)
+                    # print('correct_ind', correct_ind)
                     per_class_correct[i] += float(len(correct_ind[0]))
                     per_class_num[i] += float(len(t_ind[0]))
         print('per_class_correct: ', per_class_correct)
@@ -375,5 +377,4 @@ class ModelTrainer():
         known_acc = per_class_acc[:len(class_list)-1].mean()
         unknown = per_class_acc[-1]
         h_score = 2 * known_acc * unknown / (known_acc + unknown)
-        print('h_score: '+str(h_score)+'known_acc: '+str(known_acc)+'Unknown_acc: '+str(unknown))
         return h_score, known_acc, unknown
