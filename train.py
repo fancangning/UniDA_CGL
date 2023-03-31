@@ -118,7 +118,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-b', '--batch_size', type=int, default=4)
     parser.add_argument('--s_threshold', type=float, default=0.0)
-    parser.add_argument('--t_threshold', type=float, default=0.0)
+    parser.add_argument('--t_threshold', type=float, default=-0.5)
 
     parser.add_argument('--dropout', type=float, default=0.2)
     parser.add_argument('--EF', type=int, default=10)

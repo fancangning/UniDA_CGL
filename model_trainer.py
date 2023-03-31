@@ -152,6 +152,9 @@ class ModelTrainer():
                         # domain_label.size(): [4, 20]
                         domain_label = Variable(inputs[3].float()).cuda()
                     
+                    # selected_idx.size(): [4, 20]
+                    selected_idx = inputs[5]
+
                     # targets.size() [4, 20]-> [4, 20, 1] -> [1, 80, 1] -> [1, 80]
                     targets = self.transform_shape(targets.unsqueeze(-1)).squeeze(-1)
 
@@ -189,40 +192,14 @@ class ModelTrainer():
                         domain_pred = self.discriminator(features)
                         domain_pred_no_back = self.discriminator_no_back(x=features, eta=0.0)
                         temp = torch.squeeze(domain_pred)[~unk_label_mask]
-                        domain_loss = self.criterion(temp, domain_label.view(-1)[~unk_label_mask])
+                        # temp.size(): [80] domain_label.view(-1)[~unk_label_mask].size(): 
+                        w = selected_idx.view(-1)*9+1
+                        domain_loss_function = nn.BCELoss(weight=w).cuda()
+                        domain_loss = domain_loss_function(temp, domain_label.view(-1)[~unk_label_mask])
                         domain_loss_no_back = self.criterion(torch.squeeze(domain_pred_no_back), domain_label.view(-1))
                         loss = loss + args.adv_coeff * (domain_loss + domain_loss_no_back)
                     
-                    node_pred = norm_node_logits[source_node_mask, :].detach().cpu().max(1)[1]
-                    node_prec = node_pred.eq(targets.masked_select(source_node_mask).detach().cpu()).double().mean()
 
-                    # Only for debugging
-                    target_labels = Variable(inputs[2]).cuda()
-                    target_labels = self.transform_shape(target_labels.unsqueeze(-1)).view(-1)
-                    if target_node_mask.any():
-
-                        target_pred = norm_node_logits[target_node_mask, :].max(1)[1]
-
-                        # <unlabeled> data mask
-                        pseudo_label_mask = ~torch.eq(targets_DT, args.num_class).detach().cpu()
-
-                        # remove unk for calculation
-                        unk_label_mask = torch.eq(target_labels[~pseudo_label_mask], args.num_class-1).detach().cpu()
-
-                        # only predict on <unlabeled> data
-                        target_prec = target_pred.eq(target_labels[~pseudo_label_mask]).double().data.cpu()
-
-                        # update prec calculation on <unlabeled> data
-                        self.meter.update(target_labels[~pseudo_label_mask].detach().cpu().view(-1).numpy(),
-                                          target_prec.numpy())
-                        
-                        # For pseudo_labeled data, remove unk data for prec calculation
-                        pseudo_unk_mask = torch.eq(target_labels[pseudo_label_mask], args.num_class-1).detach().cpu()
-                        pseudo_prec = torch.eq(target_labels[pseudo_label_mask], targets_DT[pseudo_label_mask]).double()
-                        if True in pseudo_unk_mask:
-                            self.meter.update(target_labels[pseudo_label_mask].detach().cpu().masked_select(~pseudo_unk_mask).view(-1).numpy(),
-                                              pseudo_prec.detach().cpu().masked_select(~pseudo_unk_mask).view(-1).numpy())
-                        
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
@@ -230,24 +207,12 @@ class ModelTrainer():
                     pbar.update()
                     if i > 150:
                         break
-
-            if (epoch + 1) % args.log_epoch == 0:
-                print('----Start Epoch {} Training --------'.format(epoch))
-
-                print('Step: {} | {}; Epoch: {}\t'
-                      'Training Loss {:.3f}\t'
-                      'Train Prec {:.3%}\t'
-                      'Target Prec {:.3%}\t'
-                      .format(epoch, len(train_loader), epoch, loss.data.cpu().numpy(),
-                              node_prec.data.cpu().numpy(), self.meter.avg[:-1].mean()))
-                self.meter.reset()
         
         # save model
         states = {'model': self.model.state_dict(),
                   'graph': self.gnnModel.state_dict(),
-                  'iteration': step,
-                  'val_acc': node_prec,
-                  'optimizer': self.optimizer.state_dict()}
+                  'discriminator': self.discriminator.state_dict(),
+                  'discriminator_no_back': self.discriminator_no_back.state_dict()}
         torch.save(states, osp.join(args.checkpoints_dir, '{}_step_{}.pth.tar'.format(args.experiment, step)))
         self.meter.reset()
     
@@ -281,7 +246,19 @@ class ModelTrainer():
             num_pos = int(self.t_num_to_select)
             for i in range(num_pos):
                 self.t_v[index_orig[i]] = 1
-        
+        # print('s_score[self.s_v==1].size(): ', s_score[self.s_v==1].size())
+        # print('s_score[self.s_v==1]: ', s_score[self.s_v==1])
+        # print('s_score[self.s_v==0].size(): ', s_score[self.s_v==0].size())
+        # print('s_score[self.s_v==0]: ', s_score[self.s_v==0])
+        print('min(s_score[self.s_v==1]): ', min(s_score[self.s_v==1]))
+        print('max(s_score[self.s_v==0]): ', max(s_score[self.s_v==0]))
+
+        # print('t_score[self.t_v==1].size(): ', t_score[self.t_v==1].size())
+        # print('t_score[self.t_v==1]: ', t_score[self.t_v==1])
+        # print('t_score[self.t_v==0].size(): ', t_score[self.t_v==0].size())
+        # print('t_score[self.t_v==0]: ', t_score[self.t_v==0])
+        print('min(t_score[self.t_v==1]): ', min(t_score[self.t_v==1]))
+        print('max(t_score[self.t_v==0]): ', max(t_score[self.t_v==0]))
         return self.s_v, self.t_v
 
     def generate_new_train_data(self, s_v, t_v, pred_y):
@@ -315,7 +292,7 @@ class ModelTrainer():
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
                 _, target_pred = norm_node_logits.max(-1)
-                score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
+                score = torch.sum(-1*norm_node_logits*torch.log(norm_node_logits), -1)
 
                 # domain_pred.size(): [1, 32] score: [1, 32]
                 score = domain_pred - score / (self.num_class - 1)
@@ -339,7 +316,6 @@ class ModelTrainer():
         class_list = [i for i in range(self.args.shared_class_num)]
 
         for batch_idx, (img, label) in enumerate(target_loader):
-            print('num_iter: ', batch_idx)
             img, label = img.cuda(), label.cuda()
             img = img.unsqueeze(0)
             label = label.squeeze().unsqueeze(0)
@@ -356,13 +332,9 @@ class ModelTrainer():
                     class_list.append(open_class)
                 
                 pred = norm_node_logits.data.max(-1)[1]
-                print('pred: ', pred)
                 ind_unk = np.where(score.squeeze().cpu() < self.args.t_threshold)[0]
-                print('score: ', score.cpu())
-                print('ind_unk: ', ind_unk)
-                pred[ind_unk] = open_class
-                print('pred: ', pred)
-                print('label: ', label)
+                ind_unk = torch.tensor(ind_unk).cuda()
+                pred[0, ind_unk] = open_class
                 pred = pred.cpu().numpy()
                 for i, t in enumerate(class_list):
                     t_ind = np.where(label.squeeze().data.cpu().numpy()==t)

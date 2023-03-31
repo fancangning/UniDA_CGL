@@ -325,9 +325,9 @@ class Office_Dataset(Base_Dataset):
                 domain_pred = discriminator_no_back(features)
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
-                score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
+                score = torch.sum(-1*norm_node_logits*torch.log(norm_node_logits), -1)
 
-                score = score / (self.num_class - 1) - domain_pred
+                score = score / torch.log(torch.tensor([self.num_class - 1])).cuda() - domain_pred
                 s_score.append(score[0].cpu().detach())
         
         for batch_idx, (img, label) in enumerate(target_loader):
@@ -344,9 +344,9 @@ class Office_Dataset(Base_Dataset):
 
                 norm_node_logits = F.softmax(node_logits[-1], dim=-1)
                 _, target_pred = norm_node_logits.max(-1)
-                score = torch.sum(-1*norm_node_logits+torch.log(norm_node_logits), -1)
+                score = torch.sum(-1*norm_node_logits*torch.log(norm_node_logits), -1)
 
-                score = domain_pred - score / (self.num_class - 1)
+                score = domain_pred - score / torch.log(torch.tensor([self.num_class - 1])).cuda()
                 t_score.append(score[0].cpu().detach())
                 pred_labels.append(target_pred[0].cpu().detach())
         s_score = torch.cat(s_score)
@@ -359,5 +359,9 @@ class Office_Dataset(Base_Dataset):
         
         print('s_score.size(): ', s_score.size())
         print('t_score.size(): ', t_score.size())
+        print('max(s_score): ', max(s_score))
+        print('min(s_score): ', min(s_score))
+        print('max(t_score): ', max(t_score))
+        print('min(t_score): ', min(t_score))
         print('pred_labels.size(): ', pred_labels.size())
         return s_score, t_score, pred_labels
