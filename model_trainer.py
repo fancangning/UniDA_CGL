@@ -237,6 +237,7 @@ class ModelTrainer():
             num_pos = int(self.s_num_to_select)
             for i in range(num_pos):
                 self.s_v[index_orig[i]] = 1
+            # print('s_score[index_orig]: ', s_score[index_orig])
         
         if max(t_score[t_unselected_idx]) > self.args.t_threshold:
             if len(t_unselected_idx) < self.t_num_to_select:
@@ -246,6 +247,7 @@ class ModelTrainer():
             num_pos = int(self.t_num_to_select)
             for i in range(num_pos):
                 self.t_v[index_orig[i]] = 1
+            # print('t_score[index_orig]: ', t_score[index_orig])
         # print('s_score[self.s_v==1].size(): ', s_score[self.s_v==1].size())
         # print('s_score[self.s_v==1]: ', s_score[self.s_v==1])
         # print('s_score[self.s_v==0].size(): ', s_score[self.s_v==0].size())
@@ -272,14 +274,14 @@ class ModelTrainer():
                 # assign the <unk> pseudo label
                 new_label_flag.append(self.args.num_class)
             else:
-                raise Exception('Wrong t_v element, 0 or 1 is right')
+                raise Exception('Wrong t_v element, legal values are 0 or 1')
         new_label_flag = torch.tensor(new_label_flag)
 
         # update source data
         if self.args.dataset == 'office':
             new_data = Office_Dataset(root=self.args.data_dir, partition='train', s_v=s_v, t_v=t_v,
                                        label_flag=new_label_flag, source=self.args.source_name, 
-                                       target=self.args.target_name, target_ratio=(self.step+1)*self.args.EF/100)
+                                       target=self.args.target_name, target_ratio=(self.step+1)*self.args.EF/100, class_num=self.args.source_class_num)
         return new_label_flag, new_data
     
     def get_transferability_score_batch(self, img, label):
