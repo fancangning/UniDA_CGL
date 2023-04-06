@@ -14,6 +14,19 @@ torch.cuda.set_device(0)
 
 def main(args):
     total_step = 100 // args.EF
+    # oda office31 A-W
+    # args.s_threshold = [-1] * total_step
+    # args.t_threshold = [-0.87, -0.65, -0.75, -0.75, -0.5, -0.75, -0.75, -0.75, -0.75, -0.5, -0.6, -0.5, -0.5, -0.5, -0.5, -0.5, -0.25, -0.35, -0.25, -0.35]
+
+    args.s_threshold = [-1] * total_step
+    args.t_threshold = [-1] * total_step
+
+    # set the log file
+    if not os.path.exists(args.logs_dir):
+        os.makedirs(args.logs_dir)
+    args.log_file = open(os.path.join(args.logs_dir, args.environment+'_'+args.dataset+'_'+args.source_name+'-'+args.target_name+'_log.txt'), 'w')
+    args.log_file.write(str(vars(args))+'\n')
+    args.log_file.flush()
 
     # set random seed
     np.random.seed(args.seed)
@@ -30,7 +43,7 @@ def main(args):
     # initialize dataset
     if args.dataset == 'office':
         args.data_dir = os.path.join(args.data_dir, 'office31')
-        data = Office_Dataset(root=args.data_dir, partition='train', s_v=None, t_v=None, label_flag=None, source=args.source_name, 
+        data = Office_Dataset(root=args.data_dir, partition='train', environment=args.environment, s_v=None, t_v=None, label_flag=None, source=args.source_name, 
                               target=args.target_name, class_num=args.source_class_num)
     else:
         print('Unknown dataset!')
@@ -49,6 +62,9 @@ def main(args):
         # total_step = 100 // args.EF
         for step in range(total_step):
             print('This is {}-th step with EF={}%'.format(step, args.EF))
+            args.log_file.write('This is {}-th step with EF={}%'.format(step, args.EF))
+            args.log_file.write('\n')
+            args.log_file.flush()
             trainer = ModelTrainer(args=args, data=data, step=step, label_flag=label_flag, 
                                    s_v=s_selected_idx, t_v=t_selected_idx, logger=None)
 
@@ -59,18 +75,22 @@ def main(args):
             trainer.train(step, epochs=4+(step)*2, step_size=args.log_epoch)
 
             # test the model
-            h_score, known_acc, unknown_acc = trainer.test(data.target_path)
+            h_score, known_acc, unknown_acc = trainer.test(data.target_path, step, data.label_flag)
 
             print('The '+str(step)+' step of total '+str(total_step-1)+' step, h_score: '+str(h_score)+' known_acc: '+str(known_acc)+' unknown_acc: '+str(unknown_acc))
+            args.log_file.write('The '+str(step)+' step of total '+str(total_step-1)+' step, h_score: '+str(h_score)+' known_acc: '+str(known_acc)+' unknown_acc: '+str(unknown_acc))
+            args.log_file.write('\n')
+            args.log_file.flush()
 
             # transferability score
             s_score, t_score, pred_y = data.transferability_score(trainer.model, trainer.gnnModel, trainer.discriminator_no_back)
 
             # select transferable source and target data
-            s_selected_idx, t_selected_idx = trainer.select_top_data(s_score, t_score)
+            s_selected_idx, t_selected_idx = trainer.select_top_data(s_score, t_score, step)
 
             # add new data
             label_flag, data = trainer.generate_new_train_data(s_selected_idx, t_selected_idx, pred_y)
+        args.log_file.close()
     else:
         # load trained weights
         raise Exception('visualization has not been completed')
@@ -97,17 +117,18 @@ if __name__ == '__main__':
     # set up path
     working_dir = os.path.dirname(os.path.abspath(__file__))
     parser.add_argument('--data_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'txt'))
-    parser.add_argument('--logs_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'logs'))
-    parser.add_argument('--checkpoints_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'checkpoints'))
+    parser.add_argument('--logs_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'logs_opda'))
+    parser.add_argument('--checkpoints_dir', type=str, metavar='PATH', default=os.path.join(working_dir, 'checkpoints_opda'))
 
     # verbose setting
     parser.add_argument('--log_step', type=int, default=30)
     parser.add_argument('--log_epoch', type=int, default=3)
 
+    parser.add_argument('--environment', type=str, default='opda')
     parser.add_argument('--source_name', type=str, default='A')
     parser.add_argument('--target_name', type=str, default='W')
 
-    parser.add_argument('--source_class_num', type=int, default=10, help='the number of source classes')
+    parser.add_argument('--source_class_num', type=int, default=20, help='the number of source classes')
     parser.add_argument('--shared_class_num', type=int, default=10, help='the number of shared classes')
 
     parser.add_argument('--eval_log_step', type=int, default=100)

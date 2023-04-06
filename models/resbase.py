@@ -12,7 +12,7 @@ class RESBase(nn.Module):
     def __init__(self, args):
         super(RESBase, self).__init__()
         self.args = args
-        self.CNN = models.resnet50(pretrained=True)
+        self.CNN = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
         modules = list(self.CNN.children())[:-1]
         self.CNN = nn.Sequential(*modules)
         #

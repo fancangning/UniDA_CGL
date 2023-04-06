@@ -216,7 +216,7 @@ class ModelTrainer():
         torch.save(states, osp.join(args.checkpoints_dir, '{}_step_{}.pth.tar'.format(args.experiment, step)))
         self.meter.reset()
     
-    def select_top_data(self, s_score, t_score):
+    def select_top_data(self, s_score, t_score, step):
         # select a set of transferable source and target samples to adapt
         self.s_num_to_select = int(s_score.size()[0] / (100//self.args.EF))
         self.t_num_to_select = int(t_score.size()[0] / (100//self.args.EF))
@@ -229,7 +229,7 @@ class ModelTrainer():
         s_unselected_idx = np.where(self.s_v==0)[0]
         t_unselected_idx = np.where(self.t_v==0)[0]
 
-        if max(s_score[s_unselected_idx]) > self.args.s_threshold:
+        if max(s_score[s_unselected_idx]) > self.args.s_threshold[step]:
             if len(s_unselected_idx) < self.s_num_to_select:
                 self.s_num_to_select = len(s_unselected_idx)
             index = np.argsort(-s_score[s_unselected_idx])
@@ -239,7 +239,7 @@ class ModelTrainer():
                 self.s_v[index_orig[i]] = 1
             # print('s_score[index_orig]: ', s_score[index_orig])
         
-        if max(t_score[t_unselected_idx]) > self.args.t_threshold:
+        if max(t_score[t_unselected_idx]) > self.args.t_threshold[step]:
             if len(t_unselected_idx) < self.t_num_to_select:
                 self.t_num_to_select = len(t_unselected_idx)
             index = np.argsort(-t_score[t_unselected_idx])
@@ -279,7 +279,7 @@ class ModelTrainer():
 
         # update source data
         if self.args.dataset == 'office':
-            new_data = Office_Dataset(root=self.args.data_dir, partition='train', s_v=s_v, t_v=t_v,
+            new_data = Office_Dataset(root=self.args.data_dir, partition='train', environment=self.args.environment, s_v=s_v, t_v=t_v,
                                        label_flag=new_label_flag, source=self.args.source_name, 
                                        target=self.args.target_name, target_ratio=(self.step+1)*self.args.EF/100, class_num=self.args.source_class_num)
         return new_label_flag, new_data
@@ -297,17 +297,17 @@ class ModelTrainer():
                 score = torch.sum(-1*norm_node_logits*torch.log(norm_node_logits), -1)
 
                 # domain_pred.size(): [1, 32] score: [1, 32]
-                score = domain_pred - score / (self.num_class - 1)
+                score = domain_pred - score / torch.log(torch.tensor([self.args.source_class_num])).cuda()
         return score
 
-    def test(self, target_path):
+    def test(self, target_path, step, label_flag):
         mean_pix = [0.485, 0.456, 0.406]
         std_pix = [0.229, 0.224, 0.225]
         transformer = transforms.Compose([transforms.Resize(256),
                                           transforms.CenterCrop(224),
                                           transforms.ToTensor(),
                                           transforms.Normalize(mean=mean_pix, std=std_pix)])
-        target_folder = ImageFolder(target_path, transform=transformer)
+        target_folder = ImageFolder(target_path, transform=transformer, label_flag=label_flag, return_label_flag=True)
         target_loader = data.DataLoader(target_folder, batch_size=32, shuffle=False, drop_last=False, num_workers=4)
 
         self.model.eval()
@@ -317,12 +317,15 @@ class ModelTrainer():
         per_class_correct = np.zeros(self.args.shared_class_num+1).astype(np.float32)
         class_list = [i for i in range(self.args.shared_class_num)]
 
-        for batch_idx, (img, label) in enumerate(target_loader):
-            img, label = img.cuda(), label.cuda()
+        for batch_idx, (img, label, flag) in enumerate(target_loader):
+            img, label, flag = img.cuda(), label.cuda(), flag.cuda()
             img = img.unsqueeze(0)
             label = label.squeeze().unsqueeze(0)
-            score = self.get_transferability_score_batch(img, label)
-            init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(label)
+            flag = flag.squeeze().unsqueeze(0)
+            print('label: ', label)
+            print('flag: ', flag)
+            score = self.get_transferability_score_batch(img, flag)
+            init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(flag)
             with torch.no_grad():
                 fea = self.model(img)
                 edge_logits, node_logits = self.gnnModel(init_node_feat=fea, init_edge_feat=init_edge, target_mask=target_edge_mask)
@@ -334,7 +337,7 @@ class ModelTrainer():
                     class_list.append(open_class)
                 
                 pred = norm_node_logits.data.max(-1)[1]
-                ind_unk = np.where(score.squeeze().cpu() < self.args.t_threshold)[0]
+                ind_unk = np.where(score.squeeze().cpu() < self.args.t_threshold[step])[0]
                 ind_unk = torch.tensor(ind_unk).cuda()
                 pred[0, ind_unk] = open_class
                 pred = pred.cpu().numpy()

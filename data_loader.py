@@ -29,7 +29,7 @@ def make_dataset_nolist(image_list):
     return image_index, label_list
 
 class ImageFolder(data.Dataset):
-    def __init__(self, image_list, transform=None, target_transform=None, return_paths=False, loader=default_loader, train=False, return_id=False):
+    def __init__(self, image_list, transform=None, target_transform=None, return_paths=False, loader=default_loader, train=False, return_id=False, label_flag=None, return_label_flag=False):
         imgs, labels = make_dataset_nolist(image_list)
         self.imgs = imgs
         self.labels = labels
@@ -39,6 +39,9 @@ class ImageFolder(data.Dataset):
         self.return_paths = return_paths
         self.return_id = return_id
         self.train = train
+        self.return_label_flag = return_label_flag
+        if self.return_label_flag:
+            self.label_flag = label_flag
     
     def __getitem__(self, index):
 
@@ -46,12 +49,16 @@ class ImageFolder(data.Dataset):
         target = self.labels[index]
         img = self.loader(path)
         img = self.transform(img)
+        if self.return_label_flag:
+            flag = self.label_flag[index]
         if self.target_transform is not None:
             target = self.target_transform(target)
         if self.return_paths:
             return img, target, path
         elif self.return_id:
             return img, target, index
+        elif self.return_label_flag:
+            return img, target, flag
         else:
             return img, target
     
@@ -201,10 +208,10 @@ class Base_Dataset(data.Dataset):
 
 class Office_Dataset(Base_Dataset):
 
-    def __init__(self, root, partition, s_v=None, t_v=None, label_flag=None, source='A', target='W', target_ratio=0.0, class_num=10):
+    def __init__(self, root, partition, environment, s_v=None, t_v=None, label_flag=None, source='A', target='W', target_ratio=0.0, class_num=10):
         super(Office_Dataset, self).__init__(root, partition, target_ratio)
         # set dataset info
-        src_name, tar_name = self.getFilePath(source, target)
+        src_name, tar_name = self.getFilePath(source, target, environment)
         self.source_path = os.path.join(root, src_name)
         self.target_path = os.path.join(root, tar_name)
         # self.class_name = ['back_pack', 'bike', 'calculator', 'headphones', 'keyboard',
@@ -245,25 +252,45 @@ class Office_Dataset(Base_Dataset):
         self.alpha_value = (self.alpha_value.max() + 1 - self.alpha_value) / self.alpha_value.mean()
         self.alpha_value = torch.tensor(self.alpha_value).float().cuda()
     
-    def getFilePath(self, source, target):
+    def getFilePath(self, source, target, environment):
+        if environment == 'oda':
+            if source == 'A':
+                src_name = 'source_amazon_oda.txt'
+            elif source == 'W':
+                src_name = 'source_webcam_oda.txt'
+            elif source == 'D':
+                src_name = 'source_dslr_oda.txt'
+            else:
+                print('Unknown Source Type, only supports A W D.')
 
-        if source == 'A':
-            src_name = 'source_amazon_oda.txt'
-        elif source == 'W':
-            src_name = 'source_webcam_oda.txt'
-        elif source == 'D':
-            src_name = 'source_dslr_oda.txt'
-        else:
-            print('Unknown Source Type, only supports A W D.')
+            if target == 'A':
+                tar_name = 'target_amazon_oda.txt'
+            elif target == 'W':
+                tar_name = 'target_webcam_oda.txt'
+            elif target == 'D':
+                tar_name = 'target_dslr_oda.txt'
+            else:
+                print('Unknown Target Type, only supports A W D.')
+        elif environment == 'opda':
+            if source == 'A':
+                src_name = 'source_amazon_opda.txt'
+            elif source == 'W':
+                src_name = 'source_webcam_opda.txt'
+            elif source == 'D':
+                src_name = 'source_dslr_opda.txt'
+            else:
+                print('Unknown Source Type, only supports A W D.')
 
-        if target == 'A':
-            tar_name = 'target_amazon_oda.txt'
-        elif target == 'W':
-            tar_name = 'target_webcam_oda.txt'
-        elif target == 'D':
-            tar_name = 'target_dslr_oda.txt'
+            if target == 'A':
+                tar_name = 'target_amazon_opda.txt'
+            elif target == 'W':
+                tar_name = 'target_webcam_opda.txt'
+            elif target == 'D':
+                tar_name = 'target_dslr_opda.txt'
+            else:
+                print('Unknown Target Type, only supports A W D.')
         else:
-            print('Unknown Target Type, only supports A W D.')
+            raise Exception('Unknown environment')
         
         return src_name, tar_name
         
@@ -301,7 +328,7 @@ class Office_Dataset(Base_Dataset):
                                                 transforms.ToTensor(),
                                                 transforms.Normalize(mean=mean_pix, std=std_pix)])
         source_folder = ImageFolder(self.source_path, transform=transformer)
-        target_folder = ImageFolder(self.target_path, transform=transformer)
+        target_folder = ImageFolder(self.target_path, transform=transformer, label_flag=self.label_flag, return_label_flag=True)
         source_loader = data.DataLoader(source_folder, batch_size=32, shuffle=False, drop_last=False, num_workers=4)
         target_loader = data.DataLoader(target_folder, batch_size=32, shuffle=False, drop_last=False, num_workers=4)
 
@@ -330,12 +357,13 @@ class Office_Dataset(Base_Dataset):
                 score = score / torch.log(torch.tensor([self.num_class - 1])).cuda() - domain_pred
                 s_score.append(score[0].cpu().detach())
         
-        for batch_idx, (img, label) in enumerate(target_loader):
-            img, label = img.cuda(), label.cuda()
+        for batch_idx, (img, label, flag) in enumerate(target_loader):
+            img, label, flag = img.cuda(), label.cuda(), flag.cuda()
             img = img.unsqueeze(0)
             label = label.squeeze().unsqueeze(0)
+            flag = flag.squeeze().unsqueeze(0)
 
-            init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(label)
+            init_edge, target_edge_mask, source_edge_mask, target_node_mask, source_node_mask = self.label2edge(flag)
 
             with torch.no_grad():
                 features = model(img)
